@@ -14,7 +14,7 @@ jobs:
       registry-internal: nvcr.io/nvstaging/mellanox
       service-account-username: nvidia-cicd
       service-account-email: svc-cloud-orch-gh@nvidia.com
-      components: '[{"name": "Multus", "imageName": "multus-cni", "Dockerfile": "images/Dockerfile"}]'
+      components: '[{"name": "Multus", "imageName": "multus-cni", "Dockerfile": "images/Dockerfile.nvidia"}]'
     secrets:
       registry-username: ${{ secrets.NVCR_USERNAME }}
       registry-token: ${{ secrets.NVCR_TOKEN }}
