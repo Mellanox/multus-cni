@@ -16,6 +16,6 @@ jobs:
       service-account-email: svc-cloud-orch-gh@nvidia.com
       components: '[{"name": "Multus", "imageName": "multus-cni", "Dockerfile": "images/Dockerfile"}]'
     secrets:
-      registry-username: ${{ github.repository_owner }}
-      registry-token: ${{ secrets.GITHUB_TOKEN }}
+      registry-username: ${{ secrets.NVCR_USERNAME }}
+      registry-token: ${{ secrets.NVCR_TOKEN }}
       cicd-gh-token: ${{ secrets.GH_TOKEN_NVIDIA_CI_CD }}
