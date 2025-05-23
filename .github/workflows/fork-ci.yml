@@ -25,7 +25,7 @@ jobs:
     uses: Mellanox/cloud-orchestration-reusable-workflows/.github/workflows/fork-ci-reusable.yml@main
     with:
       registry-internal: nvcr.io/nvstaging/mellanox
-      service-account-username: nvidia-cicd
+      service-account-username: nvidia-ci-cd
       service-account-email: svc-cloud-orch-gh@nvidia.com
       components: '[{"name": "Multus", "imageName": "multus-cni", "Dockerfile": "images/Dockerfile.nvidia"}]'
     secrets:
