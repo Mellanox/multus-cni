@@ -24,7 +24,7 @@ RUN  cd /usr/src/multus-cni && \
 FROM nvcr.io/nvidia/distroless/go:v3.1.6
 LABEL org.opencontainers.image.source https://nvcr.io/nvidia/cloud-native/multus-cni
 # Provide the source code and license in the container
-COPY --from=build /usr/src/multus-cni
+COPY --from=build /usr/src/multus-cni /src
 WORKDIR /
 
 COPY --from=build /usr/src/multus-cni/bin/install_multus /
