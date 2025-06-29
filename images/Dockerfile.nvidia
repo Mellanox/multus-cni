@@ -25,6 +25,7 @@ FROM nvcr.io/nvidia/doca/doca:3.0.0-base-rt-host
 LABEL org.opencontainers.image.source https://nvcr.io/nvidia/cloud-native/multus-cni
 # Provide the source code and license in the container
 COPY --from=build /usr/src/multus-cni /usr/src/multus-cni
+RUN rm -rf /usr/src/multus-cni/vendor /usr/src/multus-cni/.git
 WORKDIR /
 
 COPY --from=build /usr/src/multus-cni/bin/install_multus /
