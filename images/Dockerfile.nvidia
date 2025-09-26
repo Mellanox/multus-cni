@@ -24,11 +24,23 @@ ARG TARGETPLATFORM
 RUN  cd /usr/src/multus-cni && \
      ./hack/build-go.sh
 
-FROM nvcr.io/nvidia/doca/doca:3.0.0-base-rt-host
+FROM nvcr.io/nvidia/distroless/go:v3.1.13
+
+USER 0:0
+
 LABEL org.opencontainers.image.source https://nvcr.io/nvidia/cloud-native/multus-cni
 # Provide the source code and license in the container
-COPY --from=build /usr/src/multus-cni /usr/src/multus-cni
-RUN rm -rf /usr/src/multus-cni/vendor /usr/src/multus-cni/.git
+COPY --from=build /usr/src/multus-cni/images /usr/src/multus-cni/cmd
+COPY --from=build /usr/src/multus-cni/cmd /usr/src/multus-cni/cmd
+COPY --from=build /usr/src/multus-cni/pkg /usr/src/multus-cni/pkg
+COPY --from=build /usr/src/multus-cni/Makefile /usr/src/multus-cni/
+COPY --from=build /usr/src/multus-cni/go.mod /usr/src/multus-cni/
+COPY --from=build /usr/src/multus-cni/go.sum /usr/src/multus-cni/
+COPY --from=build /usr/src/multus-cni/CODE_OF_CONDUCT.md /usr/src/multus-cni/
+COPY --from=build /usr/src/multus-cni/CONTRIBUTING.md /usr/src/multus-cni/
+COPY --from=build /usr/src/multus-cni/LICENSE /usr/src/multus-cni/
+COPY --from=build /usr/src/multus-cni/README.md /usr/src/multus-cni/
+
 WORKDIR /
 
 COPY --from=build /usr/src/multus-cni/bin/install_multus /
