@@ -21,7 +21,6 @@ import (
 	b64 "encoding/base64"
 	"encoding/json"
 	"fmt"
-	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -225,10 +224,8 @@ func (o *Options) createKubeConfig(prevCAHash, prevSATokenHash []byte) ([]byte, 
 	if err != nil {
 		return nil, nil, fmt.Errorf("template parse error: %v", err)
 	}
-	// Use net.JoinHostPort which properly handles both IPv4 and IPv6 addresses
-	// (adds brackets only for IPv6, matching k8s.io/client-go/rest behavior)
 	templateData := map[string]string{
-		"KubeConfigHost":          fmt.Sprintf("%s://%s", kubeProtocol, net.JoinHostPort(kubeHost, kubePort)),
+		"KubeConfigHost":          fmt.Sprintf("%s://[%s]:%s", kubeProtocol, kubeHost, kubePort),
 		"KubeServerTLS":           tlsConfig,
 		"KubeServiceAccountToken": string(saTokenByte),
 	}
