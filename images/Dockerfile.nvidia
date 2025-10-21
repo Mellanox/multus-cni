@@ -29,6 +29,7 @@ FROM nvcr.io/nvidia/distroless/go:v3.1.13
 USER 0:0
 
 LABEL org.opencontainers.image.source https://nvcr.io/nvidia/cloud-native/multus-cni
+COPY --from=build /usr/src/multus-cni/bin /usr/src/multus-cni/bin
 # Provide the source code and license in the container
 COPY --from=build /usr/src/multus-cni/images /usr/src/multus-cni/cmd
 COPY --from=build /usr/src/multus-cni/cmd /usr/src/multus-cni/cmd
