@@ -272,6 +272,207 @@ var _ = Describe("DRA Client operations", func() {
 			})
 		})
 
+		Context("when device has k8s.cni.cncf.io/resourceName attribute", func() {
+			It("should use resourceName as the resource map key instead of claim/request", func() {
+				claimName := "test-claim-generated-xyz"
+				deviceName := "device-1"
+				driverName := "test-driver.example.com"
+				poolName := "test-pool"
+				requestName := "container-0-request-0"
+				deviceID := "pci:0000:00:01.0"
+				resName := "port1-vfs"
+
+				deviceIDValue := deviceID
+				resNameValue := resName
+				resourceSlice := &resourcev1api.ResourceSlice{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "test-resource-slice",
+					},
+					Spec: resourcev1api.ResourceSliceSpec{
+						Driver: driverName,
+						Pool: resourcev1api.ResourcePool{
+							Name:               poolName,
+							ResourceSliceCount: 1,
+						},
+						Devices: []resourcev1api.Device{
+							{
+								Name: deviceName,
+								Attributes: map[resourcev1api.QualifiedName]resourcev1api.DeviceAttribute{
+									"k8s.cni.cncf.io/deviceID": {
+										StringValue: &deviceIDValue,
+									},
+									"k8s.cni.cncf.io/resourceName": {
+										StringValue: &resNameValue,
+									},
+								},
+							},
+						},
+					},
+				}
+
+				resourceClaim := &resourcev1api.ResourceClaim{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      claimName,
+						Namespace: "default",
+					},
+					Status: resourcev1api.ResourceClaimStatus{
+						Allocation: &resourcev1api.AllocationResult{
+							Devices: resourcev1api.DeviceAllocationResult{
+								Results: []resourcev1api.DeviceRequestAllocationResult{
+									{
+										Request: requestName,
+										Driver:  driverName,
+										Pool:    poolName,
+										Device:  deviceName,
+									},
+								},
+							},
+						},
+					},
+				}
+
+				claimNamePtr := claimName
+				pod := &v1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-pod",
+						Namespace: "default",
+						UID:       k8sTypes.UID("test-uid"),
+					},
+					Status: v1.PodStatus{
+						ResourceClaimStatuses: []v1.PodResourceClaimStatus{
+							{
+								ResourceClaimName: &claimNamePtr,
+							},
+						},
+					},
+				}
+
+				_, err := fakeClient.ResourceV1().ResourceClaims("default").Create(context.TODO(), resourceClaim, metav1.CreateOptions{})
+				Expect(err).NotTo(HaveOccurred())
+				_, err = fakeClient.ResourceV1().ResourceSlices().Create(context.TODO(), resourceSlice, metav1.CreateOptions{})
+				Expect(err).NotTo(HaveOccurred())
+
+				resourceMap := make(map[string]*types.ResourceInfo)
+				err = draClient.GetPodResourceMap(pod, resourceMap)
+				Expect(err).NotTo(HaveOccurred())
+
+				// Key should be the resourceName, not claim/request
+				Expect(resourceMap).To(HaveKey(resName))
+				Expect(resourceMap[resName].DeviceIDs).To(Equal([]string{deviceID}))
+				// The claim/request key should NOT be present
+				fallbackKey := fmt.Sprintf("%s/%s", claimName, requestName)
+				Expect(resourceMap).NotTo(HaveKey(fallbackKey))
+			})
+		})
+
+		Context("when pod has ExtendedResourceClaimStatus (extended resource feature gate)", func() {
+			It("should populate resource map using extended resource name as key", func() {
+				claimName := "ext-resource-dual-port-extended-resources-4sd7g"
+				device1Name := "0000-08-00-3"
+				device2Name := "0000-08-02-2"
+				driverName := "sriovnetwork.k8snetworkplumbingwg.io"
+				poolName := "c-234-183-40-044"
+				deviceID1 := "0000:08:00.3"
+				deviceID2 := "0000:08:02.2"
+
+				deviceID1Value := deviceID1
+				deviceID2Value := deviceID2
+				resourceSlice := &resourcev1api.ResourceSlice{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "test-resource-slice",
+					},
+					Spec: resourcev1api.ResourceSliceSpec{
+						Driver: driverName,
+						Pool: resourcev1api.ResourcePool{
+							Name:               poolName,
+							ResourceSliceCount: 1,
+						},
+						Devices: []resourcev1api.Device{
+							{
+								Name: device1Name,
+								Attributes: map[resourcev1api.QualifiedName]resourcev1api.DeviceAttribute{
+									"k8s.cni.cncf.io/deviceID": {StringValue: &deviceID1Value},
+								},
+							},
+							{
+								Name: device2Name,
+								Attributes: map[resourcev1api.QualifiedName]resourcev1api.DeviceAttribute{
+									"k8s.cni.cncf.io/deviceID": {StringValue: &deviceID2Value},
+								},
+							},
+						},
+					},
+				}
+
+				resourceClaim := &resourcev1api.ResourceClaim{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      claimName,
+						Namespace: "default",
+					},
+					Status: resourcev1api.ResourceClaimStatus{
+						Allocation: &resourcev1api.AllocationResult{
+							Devices: resourcev1api.DeviceAllocationResult{
+								Results: []resourcev1api.DeviceRequestAllocationResult{
+									{
+										Request: "container-0-request-0",
+										Driver:  driverName,
+										Pool:    poolName,
+										Device:  device1Name,
+									},
+									{
+										Request: "container-0-request-1",
+										Driver:  driverName,
+										Pool:    poolName,
+										Device:  device2Name,
+									},
+								},
+							},
+						},
+					},
+				}
+
+				pod := &v1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "ext-resource-dual-port",
+						Namespace: "default",
+						UID:       k8sTypes.UID("dc0b90ad-0ca2-4d83-bac9-61e053a86850"),
+					},
+					Status: v1.PodStatus{
+						ResourceClaimStatuses: nil,
+						ExtendedResourceClaimStatus: &v1.PodExtendedResourceClaimStatus{
+							ResourceClaimName: claimName,
+							RequestMappings: []v1.ContainerExtendedResourceRequest{
+								{
+									ContainerName: "test-container",
+									ResourceName:  "example.com/sriov-port1",
+									RequestName:   "container-0-request-0",
+								},
+								{
+									ContainerName: "test-container",
+									ResourceName:  "example.com/sriov-port2",
+									RequestName:   "container-0-request-1",
+								},
+							},
+						},
+					},
+				}
+
+				_, err := fakeClient.ResourceV1().ResourceClaims("default").Create(context.TODO(), resourceClaim, metav1.CreateOptions{})
+				Expect(err).NotTo(HaveOccurred())
+				_, err = fakeClient.ResourceV1().ResourceSlices().Create(context.TODO(), resourceSlice, metav1.CreateOptions{})
+				Expect(err).NotTo(HaveOccurred())
+
+				resourceMap := make(map[string]*types.ResourceInfo)
+				err = draClient.GetPodResourceMap(pod, resourceMap)
+				Expect(err).NotTo(HaveOccurred())
+
+				Expect(resourceMap).To(HaveKey("example.com/sriov-port1"))
+				Expect(resourceMap["example.com/sriov-port1"].DeviceIDs).To(Equal([]string{deviceID1}))
+				Expect(resourceMap).To(HaveKey("example.com/sriov-port2"))
+				Expect(resourceMap["example.com/sriov-port2"].DeviceIDs).To(Equal([]string{deviceID2}))
+			})
+		})
+
 		Context("when resource claim does not exist", func() {
 			It("should return an error", func() {
 				claimName := "non-existent-claim"
