@@ -40,9 +40,13 @@ func (d *draClient) GetPodResourceMap(pod *v1.Pod, resourceMap map[string]*types
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
-	for _, claimResource := range pod.Status.ResourceClaimStatuses { // (resourceClaimName/RequestedDevice)
+	for _, claimResource := range pod.Status.ResourceClaimStatuses {
+		// Use generated claim name to fetch the ResourceClaim from the API
 		claimName := *claimResource.ResourceClaimName
-		logging.Debugf("GetPodResourceMap: processing resource claim: %s", claimName)
+		// Use spec ref name (claimResource.Name) for the resource map key so NAD annotations
+		// can use a stable key like "sriov-port1/vf1" that matches pod.spec.resourceClaims[].name.
+		claimRefName := claimResource.Name
+		logging.Debugf("GetPodResourceMap: processing resource claim: %s (ref name: %s)", claimName, claimRefName)
 
 		// get resource claim
 		resourceClaim, ok := d.resourceClaimCache[claimName]
@@ -69,7 +73,7 @@ func (d *draClient) GetPodResourceMap(pod *v1.Pod, resourceMap map[string]*types
 				return err
 			}
 
-			resourceMapKey := fmt.Sprintf("%s/%s", claimName, result.Request)
+			resourceMapKey := fmt.Sprintf("%s/%s", claimRefName, result.Request)
 			if rInfo, ok := resourceMap[resourceMapKey]; ok {
 				rInfo.DeviceIDs = append(rInfo.DeviceIDs, deviceID)
 				logging.Debugf("GetPodResourceMap: appended device ID %s to existing resource map entry %s", deviceID, resourceMapKey)
@@ -81,8 +85,76 @@ func (d *draClient) GetPodResourceMap(pod *v1.Pod, resourceMap map[string]*types
 		logging.Debugf("GetPodResourceMap: successfully processed resource claim %s", claimName)
 	}
 
+	// Process ExtendedResourceClaimStatus (pods using extended resource feature gate)
+	if pod.Status.ExtendedResourceClaimStatus != nil {
+		if err := d.processExtendedResourceClaimStatus(ctx, pod, resourceMap); err != nil {
+			return err
+		}
+	}
+
 	logging.Verbosef("GetPodResourceMap: successfully processed all DRA resources for pod %s/%s, total resources: %d",
 		pod.Namespace, pod.Name, len(resourceMap))
+	return nil
+}
+
+// processExtendedResourceClaimStatus fills the resource map for pods that use
+// the extended resource feature gate (pod.Status.ExtendedResourceClaimStatus).
+// The resource map key is the extended resource name (e.g. example.com/sriov-port1)
+// from requestMappings[].resourceName.
+func (d *draClient) processExtendedResourceClaimStatus(ctx context.Context, pod *v1.Pod, resourceMap map[string]*types.ResourceInfo) error {
+	extStatus := pod.Status.ExtendedResourceClaimStatus
+	claimName := extStatus.ResourceClaimName
+	logging.Debugf("GetPodResourceMap: processing extended resource claim: %s", claimName)
+
+	resourceClaim, ok := d.resourceClaimCache[claimName]
+	if !ok {
+		var err error
+		resourceClaim, err = d.client.ResourceClaims(pod.Namespace).Get(ctx, claimName, metav1.GetOptions{})
+		if err != nil {
+			logging.Errorf("GetPodResourceMap: failed to get extended resource claim %s: %v", claimName, err)
+			return err
+		}
+		d.resourceClaimCache[claimName] = resourceClaim
+		logging.Debugf("GetPodResourceMap: cached extended resource claim %s", claimName)
+	}
+
+	if resourceClaim.Status.Allocation == nil || resourceClaim.Status.Allocation.Devices.Results == nil {
+		logging.Errorf("GetPodResourceMap: claim %s has no device allocation", claimName)
+		return fmt.Errorf("claim %s has no device allocation", claimName)
+	}
+
+	// Group allocation results by request name (a request can have count > 1, so multiple results per request)
+	resultsByRequest := make(map[string][]resourcev1api.DeviceRequestAllocationResult)
+	for _, result := range resourceClaim.Status.Allocation.Devices.Results {
+		resultsByRequest[result.Request] = append(resultsByRequest[result.Request], result)
+	}
+
+	for _, mapping := range extStatus.RequestMappings {
+		results, ok := resultsByRequest[mapping.RequestName]
+		if !ok || len(results) == 0 {
+			logging.Errorf("GetPodResourceMap: extended resource request %s not found in claim %s", mapping.RequestName, claimName)
+			return fmt.Errorf("request %s not found in claim %s", mapping.RequestName, claimName)
+		}
+
+		resourceMapKey := mapping.ResourceName
+		for _, result := range results {
+			deviceID, err := d.getDeviceID(ctx, result)
+			if err != nil {
+				logging.Errorf("GetPodResourceMap: failed to get device info for extended resource claim %s request %s: %v", claimName, mapping.RequestName, err)
+				return err
+			}
+
+			if rInfo, ok := resourceMap[resourceMapKey]; ok {
+				rInfo.DeviceIDs = append(rInfo.DeviceIDs, deviceID)
+				logging.Debugf("GetPodResourceMap: appended device ID %s to extended resource map entry %s", deviceID, resourceMapKey)
+			} else {
+				resourceMap[resourceMapKey] = &types.ResourceInfo{DeviceIDs: []string{deviceID}}
+				logging.Debugf("GetPodResourceMap: created new extended resource map entry %s with device ID %s", resourceMapKey, deviceID)
+			}
+		}
+	}
+
+	logging.Debugf("GetPodResourceMap: successfully processed extended resource claim %s", claimName)
 	return nil
 }
 
