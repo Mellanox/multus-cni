@@ -18,6 +18,7 @@ package multus
 //revive:disable:dot-imports
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -26,11 +27,13 @@ import (
 	"time"
 
 	"github.com/containernetworking/cni/pkg/skel"
+	cnitypes "github.com/containernetworking/cni/pkg/types"
 	cni100 "github.com/containernetworking/cni/pkg/types/100"
 	"github.com/containernetworking/plugins/pkg/ns"
 	"github.com/containernetworking/plugins/pkg/testutils"
 	"gopkg.in/k8snetworkplumbingwg/multus-cni.v4/pkg/logging"
 	testhelpers "gopkg.in/k8snetworkplumbingwg/multus-cni.v4/pkg/testing"
+	"gopkg.in/k8snetworkplumbingwg/multus-cni.v4/pkg/types"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -61,11 +64,10 @@ func newPodInformer(ctx context.Context, kclient kubernetes.Interface) cache.Sha
 
 	informerFactory.Start(ctx.Done())
 
-	waitCtx, waitCancel := context.WithTimeout(ctx, 20*time.Second)
-	if !cache.WaitForCacheSync(waitCtx.Done(), podInformer.HasSynced) {
-		logging.Errorf("failed to sync pod informer cache")
-	}
-	waitCancel()
+	// Note: Do NOT call WaitForCacheSync here with fake clients in K8s 1.34+.
+	// WaitForCacheSync waits for bookmark events that fake clients don't send, causing 20s timeouts.
+	// Fake clients also don't properly populate informer caches via LIST/WATCH operations.
+	// Tests must manually populate informer caches using informer.GetStore().Add().
 
 	return podInformer
 }
@@ -83,11 +85,10 @@ func newNetDefInformer(ctx context.Context, client netdefclient.Interface) cache
 
 	informerFactory.Start(ctx.Done())
 
-	waitCtx, waitCancel := context.WithTimeout(ctx, 20*time.Second)
-	if !cache.WaitForCacheSync(waitCtx.Done(), netdefInformer.HasSynced) {
-		logging.Errorf("failed to sync pod informer cache")
-	}
-	waitCancel()
+	// Note: Do NOT call WaitForCacheSync here with fake clients in K8s 1.34+.
+	// WaitForCacheSync waits for bookmark events that fake clients don't send, causing 20s timeouts.
+	// Fake clients also don't properly populate informer caches via LIST/WATCH operations.
+	// Tests must manually populate informer caches using informer.GetStore().Add().
 
 	return netdefInformer
 }
@@ -936,13 +937,22 @@ var _ = Describe("multus operations cniVersion 1.0.0 config", func() {
 		fExec.addPlugin100(nil, "eth0", net1, expectedResult1, nil)
 
 		fKubeClient := NewFakeClientInfo()
-		fKubeClient.AddPod(fakePod)
-		_, err := fKubeClient.AddNetAttachDef(testhelpers.NewFakeNetAttachDef("kube-system", "net1", net1))
-		Expect(err).NotTo(HaveOccurred())
 
 		podInformer := newPodInformer(ctx, fKubeClient.Client)
 		netdefInformer := newNetDefInformer(ctx, fKubeClient.NetClient)
 		fKubeClient.SetK8sClientInformers(podInformer, netdefInformer)
+
+		// In K8s 1.34+, fake clients don't properly populate informer caches via LIST/WATCH.
+		// Manually add objects to both the fake client AND the informer cache stores.
+		fKubeClient.AddPod(fakePod)
+		err := podInformer.GetStore().Add(fakePod)
+		Expect(err).NotTo(HaveOccurred())
+
+		netDef := testhelpers.NewFakeNetAttachDef("kube-system", "net1", net1)
+		_, err = fKubeClient.AddNetAttachDef(netDef)
+		Expect(err).NotTo(HaveOccurred())
+		err = netdefInformer.GetStore().Add(netDef)
+		Expect(err).NotTo(HaveOccurred())
 
 		result, err := CmdAdd(args, fExec, fKubeClient)
 		Expect(err).NotTo(HaveOccurred())
@@ -987,19 +997,28 @@ var _ = Describe("multus operations cniVersion 1.0.0 config", func() {
 		fExec.addPlugin100(nil, "eth0", net1, expectedResult1, nil)
 
 		fKubeClient := NewFakeClientInfo()
-		_, err := fKubeClient.AddNetAttachDef(testhelpers.NewFakeNetAttachDef("kube-system", "net1", net1))
-		Expect(err).NotTo(HaveOccurred())
 
 		podInformer := newPodInformer(ctx, fKubeClient.Client)
 		netdefInformer := newNetDefInformer(ctx, fKubeClient.NetClient)
 		fKubeClient.SetK8sClientInformers(podInformer, netdefInformer)
 
+		// In K8s 1.34+, fake clients don't properly populate informer caches via LIST/WATCH.
+		// Manually add NetAttachDef to both fake client AND informer cache.
+		netDef := testhelpers.NewFakeNetAttachDef("kube-system", "net1", net1)
+		_, err := fKubeClient.AddNetAttachDef(netDef)
+		Expect(err).NotTo(HaveOccurred())
+		err = netdefInformer.GetStore().Add(netDef)
+		Expect(err).NotTo(HaveOccurred())
+
+		// Add pod AFTER a delay to simulate "pod not immediately found" scenario.
+		// Add to both fake client and informer cache when it becomes available.
 		wg := sync.WaitGroup{}
 		wg.Add(1)
 		go func() {
 			wg.Done()
 			time.Sleep(1 * time.Second)
 			fKubeClient.AddPod(fakePod)
+			podInformer.GetStore().Add(fakePod)
 		}()
 		wg.Wait()
 
@@ -1244,6 +1263,109 @@ var _ = Describe("multus operations cniVersion 1.1.0 config", func() {
 		Expect(fExec.statusIndex).To(Equal(1))
 	})
 
+	It("returns empty add result using top-level cniVersion when pod is not found", func() {
+		args := &skel.CmdArgs{
+			ContainerID: "123456789",
+			Netns:       testNS.Path(),
+			IfName:      "eth0",
+			Args:        "K8S_POD_NAME=missing-pod;K8S_POD_NAMESPACE=default",
+			StdinData: []byte(`{
+	    "name": "node-cni-network",
+	    "type": "multus",
+	    "kubeconfig": "/etc/kubernetes/node-kubeconfig.yaml",
+	    "cniVersion": "1.1.0",
+	    "delegates": [{
+	        "name": "weave1",
+	        "cniVersion": "1.1.0",
+	        "type": "weave-net"
+	    }]
+	}`),
+		}
+
+		fExec := newFakeExec()
+		fKubeClient := NewFakeClientInfo()
+
+		result, err := CmdAdd(args, fExec, fKubeClient)
+		Expect(err).NotTo(HaveOccurred())
+		r, ok := result.(*cni100.Result)
+		Expect(ok).To(BeTrue())
+		Expect(r.CNIVersion).To(Equal("1.1.0"))
+		Expect(fExec.addIndex).To(Equal(0))
+	})
+
+	It("propagates delegate STATUS errors", func() {
+		args := &skel.CmdArgs{
+			ContainerID: "123456789",
+			Netns:       testNS.Path(),
+			IfName:      "eth0",
+		}
+		k8sArgs := &types.K8sArgs{
+			K8S_POD_NAMESPACE:          cnitypes.UnmarshallableString("default"),
+			K8S_POD_NAME:               cnitypes.UnmarshallableString("pod"),
+			K8S_POD_INFRA_CONTAINER_ID: cnitypes.UnmarshallableString("sandbox"),
+			K8S_POD_UID:                cnitypes.UnmarshallableString("uid"),
+		}
+
+		delegateConf, err := types.LoadDelegateNetConf([]byte(`{
+	    "name": "weave1",
+	    "cniVersion": "1.1.0",
+	    "type": "weave-net"
+	}`), nil, "", "")
+		Expect(err).NotTo(HaveOccurred())
+		rt, _ := types.CreateCNIRuntimeConf(args, k8sArgs, args.IfName, nil, delegateConf)
+
+		fExec := newFakeExec()
+		expectedConf := `{
+	    "name": "weave1",
+	    "cniVersion": "1.1.0",
+	    "type": "weave-net"
+	}`
+		fExec.addPlugin100(nil, "", expectedConf, nil, &cnitypes.Error{Code: 50, Msg: "status failed"})
+
+		err = DelegateStatus(fExec, delegateConf, rt, &types.NetConf{BinDir: "/bin", CNIDir: tmpDir})
+		Expect(err).To(HaveOccurred())
+		var cniErr *cnitypes.Error
+		Expect(errors.As(err, &cniErr)).To(BeTrue())
+		Expect(cniErr.Code).To(Equal(uint(50)))
+		Expect(cniErr.Msg).To(Equal("status failed"))
+	})
+
+	It("propagates CmdStatus errors for single plugin delegates", func() {
+		args := &skel.CmdArgs{
+			ContainerID: "123456789",
+			Netns:       testNS.Path(),
+			IfName:      "eth0",
+			StdinData: []byte(`{
+	    "name": "node-cni-network",
+	    "type": "multus",
+	    "defaultnetworkfile": "/tmp/foo.multus.conf",
+	    "defaultnetworkwaitseconds": 3,
+	    "delegates": [{
+	        "name": "weave1",
+	        "cniVersion": "1.1.0",
+	        "type": "weave-net"
+	    }]
+	}`),
+		}
+
+		logging.SetLogLevel("verbose")
+
+		fExec := newFakeExec()
+		expectedConf := `{
+	    "name": "weave1",
+	    "cniVersion": "1.1.0",
+	    "type": "weave-net"
+	}`
+		fExec.addPlugin100(nil, "", expectedConf, nil, &cnitypes.Error{Code: 50, Msg: "status failed"})
+
+		err := CmdStatus(args, fExec, nil)
+		Expect(err).To(HaveOccurred())
+		var cniErr *cnitypes.Error
+		Expect(errors.As(err, &cniErr)).To(BeTrue())
+		Expect(cniErr.Code).To(Equal(uint(50)))
+		Expect(cniErr.Msg).To(Equal("status failed"))
+	})
+
 	It("executes delegates with CNI GC", func() {
 		tmpCNIDir := tmpDir + "/cniData"
 		err := os.Mkdir(tmpCNIDir, 0777)
@@ -1319,6 +1441,44 @@ var _ = Describe("multus operations cniVersion 1.1.0 config", func() {
 		Expect(err).NotTo(HaveOccurred())
 		// we only execute once for cluster network, not additional one
 		Expect(fExec.gcIndex).To(Equal(1))
+		err = os.RemoveAll(tmpCNIDir)
+		Expect(err).NotTo(HaveOccurred())
+	})
+
+	It("executes single plugin delegates with CNI GC", func() {
+		tmpCNIDir := tmpDir + "/cniData-single"
+		err := os.Mkdir(tmpCNIDir, 0777)
+		Expect(err).NotTo(HaveOccurred())
+
+		cniCacheDir := filepath.Join(tmpCNIDir, "/results")
+		err = os.Mkdir(cniCacheDir, 0777)
+		Expect(err).NotTo(HaveOccurred())
+
+		args := &skel.CmdArgs{
+			ContainerID: "123456789",
+			Netns:       testNS.Path(),
+			IfName:      "eth0",
+			StdinData: []byte(fmt.Sprintf(`{
+	    "name": "node-cni-network",
+	    "type": "multus",
+	    "defaultnetworkfile": "/tmp/foo.multus.conf",
+	    "defaultnetworkwaitseconds": 3,
+	    "cniDir": "%s",
+	    "delegates": [{
+	        "name": "weave1",
+	        "cniVersion": "1.1.0",
+	        "type": "weave-net"
+	    }]
+	}`, tmpCNIDir)),
+		}
+
+		fExec := newFakeExec()
+		fExec.addPlugin100(nil, "", "", nil, nil)
+
+		err = CmdGC(args, fExec, nil)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(fExec.gcIndex).To(Equal(1))
+
 		err = os.RemoveAll(tmpCNIDir)
 		Expect(err).NotTo(HaveOccurred())
 	})
