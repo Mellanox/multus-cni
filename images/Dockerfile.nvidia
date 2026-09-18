@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-ARG BASE_IMAGE_DOCA_FULL_RT_HOST
+ARG BASE_IMAGE_GO_DISTROLESS
 
 FROM --platform=$BUILDPLATFORM golang:1.26 as build
 
@@ -26,9 +26,17 @@ ARG TARGETPLATFORM
 RUN  cd /usr/src/multus-cni && \
      ./hack/build-go.sh
 
-FROM ${BASE_IMAGE_DOCA_FULL_RT_HOST:-nvcr.io/nvidia/doca/doca:3.2.1-full-rt-host}
+# Distroless bases ship /var/run as a real directory instead of a symlink to
+# /run. multus-daemon resolves the netns path handed to it by the runtime
+# (/var/run/netns/cni-*) against its own filesystem, while the DaemonSet only
+# mounts the host netns at /run/netns, so thick mode fails without this link.
+RUN mkdir -p /var-run-link/var && ln -s /run /var-run-link/var/run
+
+FROM ${BASE_IMAGE_GO_DISTROLESS:-nvcr.io/nvidia/distroless/go:v4.0.9}
 
 USER 0:0
+
+COPY --from=build /var-run-link/ /
 
 LABEL org.opencontainers.image.source https://nvcr.io/nvidia/cloud-native/multus-cni
 COPY --from=build /usr/src/multus-cni/bin /usr/src/multus-cni/bin
