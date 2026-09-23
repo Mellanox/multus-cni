@@ -36,7 +36,7 @@ FROM ${BASE_IMAGE_GO_DISTROLESS:-nvcr.io/nvidia/distroless/go:v4.0.9}
 
 USER 0:0
 
-COPY --from=build /var-run-link/ /
+COPY --link --from=build /var-run-link/ /
 
 LABEL org.opencontainers.image.source https://nvcr.io/nvidia/cloud-native/multus-cni
 COPY --from=build /usr/src/multus-cni/bin /usr/src/multus-cni/bin
